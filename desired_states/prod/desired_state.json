@@ -1,0 +1,23 @@
+{
+  "environment": "prod",
+  "region": "us-east-1",
+  "last_updated": "2026-06-27T00:00:00Z",
+  "resources": {
+    "ec2_instances": {
+      "REPLACE_WITH_PROD_INSTANCE_ID": {
+        "instance_type": "t3.nano",
+        "state": "running",
+        "tags": { "ManagedBy": "terraform" }
+      }
+    },
+    "security_groups": {
+      "REPLACE_WITH_PROD_SG_ID": {
+        "ingress_rules": [],
+        "egress_rules": [
+          { "protocol": "-1", "from_port": 0, "to_port": 0, "cidr": "0.0.0.0/0" }
+        ]
+      }
+    },
+    "s3_buckets": {}
+  }
+}

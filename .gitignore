@@ -1,0 +1,26 @@
+.env
+*.tfstate
+*.tfstate.*
+*.tfstate.backup
+terraform.tfstate.*.backup
+.terraform/
+.terraform.lock.hcl
+__pycache__/
+*.pyc
+node_modules/
+dist/
+build/
+.env.local
+lambda/drift_detector.zip
+lambda/drift_classifier.zip
+lambda/drift_remediator.zip
+terraform_outputs.json
+*accessKeys.csv
+*.csv
+
+# Local reference / planning docs — not part of the public project
+Project_Details.md
+PROJECT_TRACKER.md
+TERRAFORM_ANALYSIS.md
+UI_SETUP_GUIDE.txt
+MANUAL_SETUP_GUIDE.md
