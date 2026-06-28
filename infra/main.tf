@@ -106,6 +106,12 @@ resource "aws_iam_role_policy" "lambda_policy" {
           "arn:aws:bedrock:*::foundation-model/anthropic.claude-haiku-4-5-20251001-v1:0",
           "arn:aws:bedrock:*:*:inference-profile/us.anthropic.claude-haiku-4-5-20251001-v1:0"
         ]
+      },
+      {
+        # status Lambda invokes the detector + classifier Lambdas
+        Effect   = "Allow"
+        Action   = ["lambda:InvokeFunction"]
+        Resource = "arn:aws:lambda:${var.aws_region_prod}:${data.aws_caller_identity.current.account_id}:function:${var.project}-*"
       }
     ]
   })
@@ -163,6 +169,18 @@ data "archive_file" "drift_remediator_zip" {
   output_path = "${path.module}/../lambda/drift_remediator.zip"
 }
 
+data "archive_file" "drift_status_zip" {
+  type        = "zip"
+  source_dir  = "${path.module}/../lambda/drift_status"
+  output_path = "${path.module}/../lambda/drift_status.zip"
+}
+
+data "archive_file" "drift_code_generator_zip" {
+  type        = "zip"
+  source_dir  = "${path.module}/../lambda/drift_code_generator"
+  output_path = "${path.module}/../lambda/drift_code_generator.zip"
+}
+
 # ─── LAMBDA FUNCTION — DRIFT CLASSIFIER (Bedrock, us-east-1 only) ─────────────
 # Runs only in us-east-1 where Bedrock Claude Haiku 4.5 is available.
 # Replace BEDROCK_MODEL_ID value with exact ID from:
@@ -185,6 +203,67 @@ resource "aws_lambda_function" "drift_classifier" {
     }
   }
   tags = local.tags
+}
+
+# ─── LAMBDA FUNCTION — CODE GENERATOR (Bedrock writes remediation code at runtime) ──
+resource "aws_lambda_function" "drift_code_generator" {
+  provider         = aws.prod
+  function_name    = "${var.project}-code-generator"
+  filename         = data.archive_file.drift_code_generator_zip.output_path
+  source_code_hash = data.archive_file.drift_code_generator_zip.output_base64sha256
+  handler          = "handler.lambda_handler"
+  runtime          = "python3.12"
+  role             = aws_iam_role.lambda_role.arn
+  timeout          = 60
+  memory_size      = 256
+  environment {
+    variables = {
+      BEDROCK_MODEL_ID = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
+      BEDROCK_REGION   = "us-east-1"
+    }
+  }
+  tags = local.tags
+}
+
+# ─── LAMBDA FUNCTION — STATUS (live drift for the dashboard, via Function URL) ──
+resource "aws_lambda_function" "drift_status" {
+  provider         = aws.prod
+  function_name    = "${var.project}-status"
+  filename         = data.archive_file.drift_status_zip.output_path
+  source_code_hash = data.archive_file.drift_status_zip.output_base64sha256
+  handler          = "handler.lambda_handler"
+  runtime          = "python3.12"
+  role             = aws_iam_role.lambda_role.arn
+  timeout          = 60
+  memory_size      = 256
+  environment {
+    variables = {
+      PROJECT           = var.project
+      AWS_REGION_TARGET = var.aws_region_prod
+    }
+  }
+  tags = local.tags
+}
+
+# Public Function URL — the Render dashboard's backend calls this to read live status.
+# Returns drift details (resource IDs); lock down with auth if that's sensitive for you.
+resource "aws_lambda_function_url" "drift_status" {
+  provider           = aws.prod
+  function_name      = aws_lambda_function.drift_status.function_name
+  authorization_type = "NONE"
+  cors {
+    allow_origins = ["*"]
+    allow_methods = ["GET", "POST"]
+  }
+}
+
+resource "aws_lambda_permission" "status_url_public" {
+  provider               = aws.prod
+  statement_id           = "AllowPublicFunctionUrl"
+  action                 = "lambda:InvokeFunctionUrl"
+  function_name          = aws_lambda_function.drift_status.function_name
+  principal              = "*"
+  function_url_auth_type = "NONE"
 }
 
 # ─── LAMBDA FUNCTIONS — DRIFT DETECTOR ────────────────────────────────────────
@@ -237,11 +316,12 @@ resource "aws_lambda_function" "drift_remediator_prod" {
   handler          = "handler.lambda_handler"
   runtime          = "python3.12"
   role             = aws_iam_role.lambda_role.arn
-  timeout          = 120
+  timeout          = 300
   memory_size      = 256
   environment {
     variables = {
       ENVIRONMENT       = "prod"
+      PROJECT           = var.project
       STATE_BUCKET      = aws_s3_bucket.state_prod.bucket
       AWS_REGION_TARGET = var.aws_region_prod
     }
@@ -257,11 +337,12 @@ resource "aws_lambda_function" "drift_remediator_dev" {
   handler          = "handler.lambda_handler"
   runtime          = "python3.12"
   role             = aws_iam_role.lambda_role.arn
-  timeout          = 120
+  timeout          = 300
   memory_size      = 256
   environment {
     variables = {
       ENVIRONMENT       = "dev"
+      PROJECT           = var.project
       STATE_BUCKET      = aws_s3_bucket.state_dev.bucket
       AWS_REGION_TARGET = var.aws_region_dev
     }

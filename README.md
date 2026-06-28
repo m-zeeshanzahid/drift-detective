@@ -268,8 +268,3 @@ charges.
 | Lambda / S3 / CloudWatch | < $0.10 |
 | **Total** | **~$0.50** |
 
----
-
-## 📜 License
-
-MIT — use freely.

@@ -14,6 +14,8 @@ build/
 lambda/drift_detector.zip
 lambda/drift_classifier.zip
 lambda/drift_remediator.zip
+lambda/drift_status.zip
+lambda/drift_code_generator.zip
 terraform_outputs.json
 *accessKeys.csv
 *.csv

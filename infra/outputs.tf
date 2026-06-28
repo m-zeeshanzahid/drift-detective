@@ -4,6 +4,7 @@ output "state_bucket_dev"  { value = aws_s3_bucket.state_dev.bucket }
 output "lambda_detector_prod_arn"   { value = aws_lambda_function.drift_detector_prod.arn }
 output "lambda_detector_dev_arn"    { value = aws_lambda_function.drift_detector_dev.arn }
 output "lambda_classifier_arn"      { value = aws_lambda_function.drift_classifier.arn }
+output "status_function_url"        { value = aws_lambda_function_url.drift_status.function_url }
 output "lambda_remediator_prod_arn" { value = aws_lambda_function.drift_remediator_prod.arn }
 output "lambda_remediator_dev_arn"  { value = aws_lambda_function.drift_remediator_dev.arn }
 
