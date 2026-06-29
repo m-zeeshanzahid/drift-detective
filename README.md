@@ -19,11 +19,12 @@ cause means digging through CloudTrail and relying on tribal knowledge.
 
 **Drift Detective makes drift visible, triaged, and supervised:**
 
-- 🔍 **Detects** drift across multiple environments in parallel
+- 🔍 **Detects** drift by diffing a Terraform `.tfstate` (any S3 path) against live AWS
 - 🧠 **Classifies** each drift with an LLM, not just a static rule engine
+- 📝 **Explains** the drift *and* lists the exact changes it will make to match the state file
 - 🚦 **Routes** by severity — safe is logged; suspicious & critical post to Slack for review
 - ✅ **Gates** every remediation behind a human approval step
-- 🔁 **Remediates** automatically once approved, restoring the desired state
+- 🔁 **Remediates** with AI-generated boto3 code (any resource type), restoring desired state
 - 📊 **Visualizes** live status per environment on a hosted dashboard
 
 ---
@@ -32,12 +33,14 @@ cause means digging through CloudTrail and relying on tribal knowledge.
 
 ```
 TRIGGER       → SuperPlane scheduled (every 15 min) or manual trigger
-FAN-OUT       → Parallel Lambda invocations (one per environment)
-LAMBDA        → Reads desired_state.json from S3, calls AWS APIs, returns drift report
-AI STEP       → Claude Haiku 4.5 (Bedrock) classifies each drift: Safe / Suspicious / Critical
+DETECT        → Lambda reads a Terraform .tfstate from S3 (configurable path), diffs its
+                resources (EC2 / security groups / S3) against live AWS → drift report
+AI STEP       → Claude Haiku 4.5 (Bedrock) classifies drift (Safe/Suspicious/Critical) and
+                writes a Slack message: detected drift + the exact changes it will apply
 ROUTING       → If overall != "safe" → Slack alert; else end (safe is just logged via run history)
 APPROVAL GATE → Engineer reviews in SuperPlane Console, approves remediation
-REMEDIATION   → Lambda apply function restores desired state
+REMEDIATION   → Remediator asks Bedrock to generate boto3 fix code at runtime, then runs it
+                (dedicated AdministratorAccess role) to bring live infra back to the state file
 RENDER WEB    → React + Express dashboard showing live drift status per environment
 RENDER WORKER → Python worker triggers scheduled scans via the SuperPlane API
 ```
@@ -89,11 +92,13 @@ drift-detective/
 │   ├── dev.tfvars
 │   └── prod.tfvars
 ├── lambda/
-│   ├── drift_detector/         # Reads desired state, diffs against live AWS
-│   ├── drift_classifier/       # Calls Bedrock Claude Haiku 4.5 to triage
-│   ├── drift_remediator/       # Restores desired state after approval
+│   ├── drift_detector/         # Reads a tfstate from S3, diffs resources vs live AWS
+│   ├── drift_classifier/       # Bedrock: classify + write the planned-changes message
+│   ├── drift_code_generator/   # Bedrock: writes boto3 remediation code at runtime
+│   ├── drift_remediator/       # Runs the generated code (AdministratorAccess) after approval
+│   ├── drift_status/           # Aggregated live status (for the dashboard)
 │   └── build.sh                # Optional manual ZIP packaging
-├── desired_states/             # Per-env desired_state.json (fill IDs after apply)
+├── desired_states/             # Example state-file templates (upload your real tfstate to S3)
 │   ├── prod/  dev/
 ├── dashboard/                  # Render Web Service (Express + React/Vite)
 │   ├── server.js
@@ -141,11 +146,14 @@ accounts. You will need:
 - Terraform ≥ 1.5, Node.js 20, Python 3.12
 - Accounts: SuperPlane, Render, Slack, GitHub
 
-### 2. Fork & clone
+### 2. Fork, clone & configure
 ```bash
 git clone https://github.com/<your-username>/drift-detective.git
 cd drift-detective
+cp .env.example .env       # then fill in YOUR values (AWS, Bedrock, SuperPlane, state path)
 ```
+`.env` is git-ignored. It drives local testing and the Render services; Terraform reads
+the `TF_VAR_*` entries (e.g. `TF_VAR_state_key`). Every value is your own — no shared creds.
 
 ### 3. Enable Bedrock & confirm the model ID
 In the AWS Console → **Bedrock → Model access** (region **us-east-1**), enable
@@ -172,13 +180,18 @@ Note the outputs — you'll need the demo instance/SG IDs and the bucket names:
 terraform output                                    # instance + SG IDs, bucket names
 ```
 
-### 5. Fill desired states & upload to S3
-Replace the `REPLACE_WITH_*` placeholders in `desired_states/*/desired_state.json`
-with the instance/SG IDs from `terraform output`, then upload each to its bucket:
+### 5. Upload the Terraform state file the detector should evaluate against
+Drift Detective compares live AWS to a **Terraform `.tfstate`** you store in S3. Upload
+the state file of the infrastructure you want to monitor to the state bucket, under the
+key in `TF_VAR_state_key` (default `terraform.tfstate`):
 ```bash
-aws s3 cp desired_states/prod/desired_state.json s3://$(terraform -chdir=infra output -raw state_bucket_prod)/desired_state.json --region us-east-1
-aws s3 cp desired_states/dev/desired_state.json  s3://$(terraform -chdir=infra output -raw state_bucket_dev)/desired_state.json  --region us-east-1
+aws s3 cp /path/to/your/terraform.tfstate \
+  s3://$(terraform -chdir=infra output -raw state_bucket_prod)/terraform.tfstate --region us-east-1
 ```
+You can point at **any** state file without redeploying by passing `state_bucket` /
+`state_key` in the detector node's event payload in SuperPlane. The detector currently
+diffs `aws_instance`, `aws_security_group`, and `aws_s3_bucket`; other resource types are
+listed under `unsupported_types` (extend the dispatch in `lambda/drift_detector/handler.py`).
 
 ### 6. Configure SuperPlane
 1. Create an organization (note the **org slug**) at app.superplane.com.
@@ -231,25 +244,28 @@ cd infra && terraform destroy -var-file=dev.tfvars
 
 ---
 
-## 🤖 How the AI Classification Works
+## 🤖 How the AI Works (classify → plan → remediate)
 
-The `drift_classifier` Lambda receives the environment reports, builds a single
-prompt, and invokes Claude Haiku 4.5 on Bedrock. Claude returns **structured JSON
-only** (no prose, no fences):
+**1. Classify + plan (`drift_classifier`).** Receives the drift reports and returns
+structured JSON. The `summary` is a ready-to-post Slack message with two sections —
+the **detected drift** and the **planned changes the remediator will apply** — framed
+as "the state file declares the desired config, so the live infra is brought back in line":
 
 ```json
 {
-  "environments": {
-    "prod": { "classification": "critical", "reason": "...", "immediate_action": "..." },
-    "dev":  { "classification": "safe",     "reason": "...", "immediate_action": "..." }
-  },
+  "environments": { "prod": { "classification": "critical", "reason": "...", "immediate_action": "..." } },
   "overall": "critical",
-  "summary": "2-3 sentence executive summary for the on-call engineer"
+  "summary": "<exec summary>\n*Detected drift:* ...\n*Planned changes the remediator will apply:* ...",
+  "planned_changes": ["Set aws_instance i-… instance_type to t3.nano (currently t2.micro)", "..."]
 }
 ```
+If parsing ever fails it **fails safe** (returns `suspicious` so a human reviews).
 
-If parsing ever fails, the Lambda **fails safe** — it returns `suspicious` so a human
-reviews rather than silently ignoring potential drift.
+**2. Remediate (`drift_code_generator` + `drift_remediator`).** After approval, the
+remediator fetches current drift, asks Bedrock (`code-generator`) to **write boto3 fix
+code at runtime**, and executes it via a `client('<service>')` factory in a restricted
+namespace — so it can remediate *any* resource type. It runs under a dedicated
+**AdministratorAccess** role; the human approval gate is the safety control.
 
 ---
 

@@ -67,9 +67,19 @@ def lambda_handler(event, context):
                 "remediation_results": [], "success_count": 0, "error_count": 1}
 
     # 3. Execute the generated code in a restricted namespace.
-    ec2 = boto3.client('ec2', region_name=region)
+    #    The generated code gets a `client(service)` factory so it can remediate ANY
+    #    AWS service (the remediator role has AdministratorAccess; human-approved).
+    def _client(service_name):
+        return boto3.client(service_name, region_name=region)
+
     results = []
-    namespace = {"__builtins__": SAFE_BUILTINS, "ec2": ec2, "drifts": drifts, "results": results}
+    namespace = {
+        "__builtins__": SAFE_BUILTINS,
+        "client": _client,
+        "ec2": _client("ec2"),  # kept for backward-compat with older generated code
+        "drifts": drifts,
+        "results": results,
+    }
     try:
         exec(code, namespace)  # noqa: S102 — intentional: runs AI-generated remediation
         results = namespace.get("results", results)

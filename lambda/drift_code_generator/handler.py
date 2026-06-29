@@ -12,28 +12,33 @@ BEDROCK_MODEL_ID = os.environ.get(
 )
 BEDROCK_REGION = os.environ.get('BEDROCK_REGION', 'us-east-1')
 
-SYSTEM_PROMPT = """You generate Python (boto3) remediation code for AWS Terraform drift.
+SYSTEM_PROMPT = """You generate Python (boto3) remediation code for AWS infrastructure drift.
+The drift was found by comparing live AWS against a Terraform state file (the desired state).
+Your code must change the live resources so they match the state file's desired values.
 
-At runtime, three names are ALREADY defined in scope:
-- `ec2`     : a boto3 EC2 client for the correct region
+At runtime, these names are ALREADY defined in scope:
+- `client`  : a function — call `client('ec2')`, `client('s3')`, `client('iam')`, etc. to get
+              a boto3 client for ANY service in the correct region.
 - `drifts`  : a list of drift findings (dicts)
 - `results` : an empty list you must append one dict to per remediation action
 
-Each drift dict has keys: resource_type, resource_id, attribute, desired, actual.
-Generate Python statements that iterate `drifts` and remediate each to restore the
-desired state. Handle these cases:
-- resource_type 'aws_instance', attribute 'instance_type': if the instance is not
-  stopped, ec2.stop_instances then wait with ec2.get_waiter('instance_stopped'); then
-  ec2.modify_instance_attribute(InstanceId=..., InstanceType={'Value': desired}); then
-  ec2.start_instances.
-- resource_type 'aws_instance', attribute 'state': desired 'running' -> ec2.start_instances;
-  desired 'stopped' -> ec2.stop_instances.
-- resource_type 'aws_security_group', attribute 'ingress_rule_count': describe the group
-  and ec2.revoke_security_group_ingress for all existing IpPermissions.
+Each drift dict has keys: resource_type, resource_id, attribute, desired, actual
+(and sometimes resource_name, detail). Generate Python that iterates `drifts` and
+remediates EACH one to the desired value — for ANY AWS resource type, not just the
+examples below. Pick the correct boto3 service/API for each resource_type.
+
+Reference patterns (apply the same idea to other types/attributes as needed):
+- aws_instance / instance_type: ec2=client('ec2'); stop the instance, wait
+  get_waiter('instance_stopped'), modify_instance_attribute(InstanceType={'Value':desired}),
+  start_instances.
+- aws_instance / state: desired 'running' -> start_instances; 'stopped' -> stop_instances.
+- aws_security_group / ingress_rule_count: describe_security_groups, then
+  revoke_security_group_ingress for all current IpPermissions (state file expects fewer).
+- aws_s3_bucket / existence: create_bucket to restore a missing bucket.
 
 Rules:
-- Output RAW Python only — NO markdown fences, NO prose, NO function/def, NO imports.
-- Use ONLY `ec2`, `drifts`, `results` (boto3 is NOT importable; `ec2` is provided).
+- Output RAW Python only — NO markdown fences, NO prose, NO def/function, NO imports.
+- Get clients ONLY via `client('<service>')`. Do NOT import boto3 (use `client`).
 - Wrap each remediation in try/except. On success append
   {"resource_id": ..., "attribute": ..., "action": "<verb>", "status": "success"}.
   On failure append {"resource_id": ..., "status": "error", "error": str(e)}.

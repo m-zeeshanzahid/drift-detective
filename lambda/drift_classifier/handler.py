@@ -12,14 +12,26 @@ BEDROCK_MODEL_ID = os.environ.get(
 )
 BEDROCK_REGION = os.environ.get('BEDROCK_REGION', 'us-east-1')
 
-SYSTEM_PROMPT = """You are a Terraform infrastructure drift classifier for a DevOps team.
-Classify each environment's drift as one of three categories:
+SYSTEM_PROMPT = """You are a Terraform drift classifier AND remediation planner for a DevOps team.
+You receive drift reports that compare LIVE AWS against a Terraform STATE FILE (the desired
+state). Each drift lists what the state file expects ("desired") vs what's live ("actual").
 
+Classify severity as one of:
 SAFE: No drift, or trivial expected changes (timestamps, metadata).
-SUSPICIOUS: Unexpected resource changes needing review but not immediately dangerous
-  (instance type change, tag modification, scaling changes).
-CRITICAL: Security-relevant or stability-threatening changes (security group ingress
-  rules added, IAM policy changes, instance stopped unexpectedly, resources deleted).
+SUSPICIOUS: Unexpected changes needing review but not immediately dangerous (instance type
+  change, tag modification, scaling changes).
+CRITICAL: Security-relevant or stability-threatening changes (security-group ingress rules
+  added, IAM policy changes, instance stopped/deleted unexpectedly, resources missing).
+
+Also write a Slack message ("summary") in Slack mrkdwn that contains THREE sections:
+1) A 1-2 sentence executive summary of the situation.
+2) "*Detected drift:*" — one "- " bullet per finding: resource (type + id), the attribute,
+   and "state file expects X, currently Y".
+3) "*Planned changes the remediator will apply:*" — one "- " bullet per finding, each phrased
+   as an action, e.g. "Set <resource> <attribute> to <desired> (currently <actual>)". End this
+   section with a sentence making clear these changes are applied BECAUSE the Terraform state
+   file declares this as the desired state, so the live infra is being brought back into line.
+If there is no drift, summary = one line saying everything matches the state file.
 
 Respond in JSON only. No prose. No markdown fences. Raw JSON only. Structure:
 {
@@ -28,7 +40,8 @@ Respond in JSON only. No prose. No markdown fences. Raw JSON only. Structure:
     "dev":  {"classification": "...", "reason": "...", "immediate_action": "..."}
   },
   "overall": "safe|suspicious|critical",
-  "summary": "2-3 sentence executive summary for the on-call engineer"
+  "summary": "<the multi-line Slack mrkdwn message described above, using *bold*, '- ' bullets and \\n newlines>",
+  "planned_changes": ["<one concise action bullet per change>", "..."]
 }"""
 
 
@@ -48,7 +61,7 @@ DEV (us-east-1):
 
     body = json.dumps({
         "anthropic_version": "bedrock-2023-05-31",
-        "max_tokens": 1024,
+        "max_tokens": 2000,
         "system": SYSTEM_PROMPT,
         "messages": [
             {"role": "user", "content": user_message}
@@ -81,6 +94,7 @@ DEV (us-east-1):
             "classification": classification,
             "overall": classification.get("overall", "unknown"),
             "summary": classification.get("summary", ""),
+            "planned_changes": classification.get("planned_changes", []),
             "environments": classification.get("environments", {})
         }
 

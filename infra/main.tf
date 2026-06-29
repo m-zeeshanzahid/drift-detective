@@ -281,6 +281,7 @@ resource "aws_lambda_function" "drift_detector_prod" {
     variables = {
       ENVIRONMENT       = "prod"
       STATE_BUCKET      = aws_s3_bucket.state_prod.bucket
+      STATE_KEY         = var.state_key
       AWS_REGION_TARGET = var.aws_region_prod
     }
   }
@@ -301,10 +302,30 @@ resource "aws_lambda_function" "drift_detector_dev" {
     variables = {
       ENVIRONMENT       = "dev"
       STATE_BUCKET      = aws_s3_bucket.state_dev.bucket
+      STATE_KEY         = var.state_key
       AWS_REGION_TARGET = var.aws_region_dev
     }
   }
   tags = merge(local.tags, { Environment = "dev" })
+}
+
+# ─── REMEDIATOR ROLE (AdministratorAccess — runs AI-generated remediation; human-approved) ──
+resource "aws_iam_role" "remediator_role" {
+  name = "${var.project}-remediator-role"
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Action    = "sts:AssumeRole"
+      Effect    = "Allow"
+      Principal = { Service = "lambda.amazonaws.com" }
+    }]
+  })
+  tags = local.tags
+}
+
+resource "aws_iam_role_policy_attachment" "remediator_admin" {
+  role       = aws_iam_role.remediator_role.name
+  policy_arn = "arn:aws:iam::aws:policy/AdministratorAccess"
 }
 
 # ─── LAMBDA FUNCTIONS — DRIFT REMEDIATOR ──────────────────────────────────────
@@ -315,7 +336,7 @@ resource "aws_lambda_function" "drift_remediator_prod" {
   source_code_hash = data.archive_file.drift_remediator_zip.output_base64sha256
   handler          = "handler.lambda_handler"
   runtime          = "python3.12"
-  role             = aws_iam_role.lambda_role.arn
+  role             = aws_iam_role.remediator_role.arn
   timeout          = 300
   memory_size      = 256
   environment {
@@ -336,7 +357,7 @@ resource "aws_lambda_function" "drift_remediator_dev" {
   source_code_hash = data.archive_file.drift_remediator_zip.output_base64sha256
   handler          = "handler.lambda_handler"
   runtime          = "python3.12"
-  role             = aws_iam_role.lambda_role.arn
+  role             = aws_iam_role.remediator_role.arn
   timeout          = 300
   memory_size      = 256
   environment {
